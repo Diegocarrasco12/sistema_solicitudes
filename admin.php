@@ -121,23 +121,26 @@ ORDER BY
   END,
   id ASC
 ";
-    
+
 $result = $conexion->query($query);
 if (!$result) die("Error en la consulta: " . $conexion->error);
 
 // Funciones
-function tiempoTranscurrido($fecha_creacion) {
+function tiempoTranscurrido($fecha_creacion)
+{
     $inicio = new DateTime($fecha_creacion);
     $actual = new DateTime();
     $diff = $inicio->diff($actual);
     return [$diff->h + ($diff->days * 24), $diff->i, $diff->s];
 }
 
-function colorContador($horas) {
+function colorContador($horas)
+{
     return $horas < 2 ? "green" : ($horas < 4 ? "orange" : "red");
 }
 
-function generarCodigoTicket($tipo, $id) {
+function generarCodigoTicket($tipo, $id)
+{
     global $conexion;
     $prefijos = ["Incidencia" => "INC", "Reclamo" => "REC", "Solicitud" => "SOL"];
     $prefijo = isset($prefijos[$tipo]) ? $prefijos[$tipo] : "TCK";
@@ -159,7 +162,7 @@ function generarCodigoTicket($tipo, $id) {
 
 // Organizar por tipo
 $ticketsPorCategoria = ["Incidencia" => [], "Reclamo" => [], "Solicitud" => [], "Gestionado" => []];
-$usuarios = ["Diego Carrasco","Josman Lara","Juan Rangel"];
+$usuarios = ["Diego Carrasco", "Josman Lara", "Juan Rangel"];
 
 while ($ticket = $result->fetch_assoc()) {
     if ($ticket["estado"] === "Gestionado") {
@@ -171,113 +174,166 @@ while ($ticket = $result->fetch_assoc()) {
 
 // Renderizar tablas
 foreach ($ticketsPorCategoria as $categoria => $tickets) {
-       if ($categoria === 'Gestionado') {
-       $tickets = array_slice(array_reverse($tickets), 0, 10);
+    if ($categoria === 'Gestionado') {
+        $tickets = array_slice(array_reverse($tickets), 0, 10);
     }
-echo "<div class='categoria'>";
-echo "<div class='d-flex justify-content-between align-items-center mb-2 px-2'>";
-echo "<h2 class='m-0' style='flex: 1;'>$categoria</h2>";
-echo "</div>";
+    echo "<div class='categoria'>";
+    echo "<div class='d-flex justify-content-between align-items-center mb-2 px-2'>";
+    echo "<h2 class='m-0' style='flex: 1;'>$categoria</h2>";
+    echo "</div>";
 
-echo "<table><thead><tr>
+    echo "<table><thead><tr>
         <th>N° Ticket</th><th>Nombre</th><th>Teléfono</th><th>Correo</th><th>Empresa</th>
         <th>Detalle</th><th>Adjunto</th><th>Tiempo</th><th>Asignar Usuario</th><th>Categoría</th><th>Estado</th><th>Acción</th>
       </tr></thead><tbody>";
 
-if (count($tickets) === 0) {
-    echo "<tr><td colspan='12' style='text-align:center; font-style: italic;'>No hay tickets en esta categoría.</td></tr>";
-}
-
-foreach ($tickets as $ticket) {
-    list($horas, $min, $seg) = tiempoTranscurrido($ticket["fecha_creacion"]);
-    $color = colorContador($horas);
-    $estadoTicket = $ticket["estado_ticket"] ?? "Ingresado";
-    $usuarioAsignado = $ticket["usuario_asignado"];
-    $id = $ticket['id'];
-    $tipoOriginal = $ticket['tipo'];
-
-    $claseFila = ($categoria === 'Gestionado') ? 'gestionado-row' : '';
-    // ⬇️ id de fila para live-sync (visual no-op)
-    echo "<tr id='row_$id' class='$claseFila'>";
-    echo "<td>" . generarCodigoTicket($ticket["tipo"], $ticket["id"]) . "</td>";
-    echo "<td>{$ticket["nombre"]}</td><td>{$ticket["telefono"]}</td><td>{$ticket["correo"]}</td><td>{$ticket["empresa"]}</td>";
-    echo "<td><button style='padding:4px 8px; font-size:12px;' onclick=\"mostrarChat($id)\">💬</button></td>";
-    echo "<td>" . (!empty($ticket["archivo"]) ? "<a href='{$ticket["archivo"]}' target='_blank'>Ver archivo</a>" : "Sin archivo") . "</td>";
-
-    // Tiempo transcurrido
-    if ($ticket["estado"] === "Gestionado" && isset($ticket["tiempo_gestionado"])) {
-        $tiempo_fijo = gmdate("H\h i\m s\s", $ticket["tiempo_gestionado"]);
-        echo "<td><span class='contador' style='background:gray;' data-activo='0'>$tiempo_fijo</span></td>";
-    } else {
-        $fechaInicio = date("c", strtotime($ticket["fecha_creacion"]));
-        echo "<td><span class='contador' style='background:$color;' data-inicio='$fechaInicio' data-activo='1'>{$horas}h {$min}m {$seg}s</span></td>";
+    if (count($tickets) === 0) {
+        echo "<tr><td colspan='12' style='text-align:center; font-style: italic;'>No hay tickets en esta categoría.</td></tr>";
     }
 
-    // Asignar Usuario (sin confirmación en el select)
-    if ($categoria === "Gestionado" || $nivel_admin === 3) {
-        echo "<td><span>$usuarioAsignado</span></td>";
-    } else {
-        echo "<td>";
-        // mantenemos la estructura if/else pero ambos sin confirm
-        if (!empty($usuarioAsignado)) {
-            echo "<select id='usuario_asignado_$id' onchange=\"asignarUsuario($id, this.value)\"><option value=''>Seleccione un usuario</option>";
+    foreach ($tickets as $ticket) {
+        $estadoTicket    = $ticket["estado_ticket"] ?? "Ingresado";
+        $usuarioAsignado = $ticket["usuario_asignado"];
+        $id              = (int)$ticket['id'];
+        $tipoOriginal    = $ticket['tipo'];
+
+        /**********************************************
+         * NUEVO: determinar inicio del tiempo
+         * - Si existe un tramo abierto en ticket_tramos → usamos fecha_inicio de ese tramo
+         * - Si no existe (tickets antiguos) → usamos fecha_creacion como antes
+         **********************************************/
+        $fecha_inicio_tramo = null;
+
+        $stmtTramo = $conexion->prepare("
+        SELECT fecha_inicio
+        FROM ticket_tramos
+        WHERE ticket_id = ? AND fecha_fin IS NULL
+        ORDER BY id DESC
+        LIMIT 1
+    ");
+        $stmtTramo->bind_param("i", $id);
+        $stmtTramo->execute();
+        $resTramo = $stmtTramo->get_result();
+        if ($rowTramo = $resTramo->fetch_assoc()) {
+            $fecha_inicio_tramo = $rowTramo['fecha_inicio'];
+        }
+        $stmtTramo->close();
+
+        // Si no hay tramo abierto, caemos al comportamiento antiguo (fecha_creacion)
+        if ($fecha_inicio_tramo) {
+            $inicioDT = new DateTime($fecha_inicio_tramo);
         } else {
-            echo "<select id='usuario_asignado_$id' onchange=\"asignarUsuario($id, this.value)\"><option value=''>Seleccione un usuario</option>";
+            $inicioDT = new DateTime($ticket["fecha_creacion"]);
         }
 
-        foreach ($usuarios as $u) {
-            $selected = ($u === $usuarioAsignado) ? "selected" : "";
-            echo "<option value='$u' $selected>$u</option>";
+        // Asegurar zona horaria correcta
+        date_default_timezone_set('America/Santiago');
+        $actualDT = new DateTime("now", new DateTimeZone('America/Santiago'));
+
+        $diff     = $actualDT->diff($inicioDT);
+
+        $horas = $diff->h + ($diff->days * 24);
+        $min   = $diff->i;
+        $seg   = $diff->s;
+
+        $color = colorContador($horas);
+
+
+
+        $claseFila = ($categoria === 'Gestionado') ? 'gestionado-row' : '';
+        // ⬇️ id de fila para live-sync (visual no-op)
+        echo "<tr id='row_$id' class='$claseFila'>";
+        echo "<td>" . generarCodigoTicket($ticket["tipo"], $ticket["id"]) . "</td>";
+        echo "<td>{$ticket["nombre"]}</td><td>{$ticket["telefono"]}</td><td>{$ticket["correo"]}</td><td>{$ticket["empresa"]}</td>";
+        echo "<td><button style='padding:4px 8px; font-size:12px;' onclick=\"mostrarChat($id)\">💬</button></td>";
+        echo "<td>" . (!empty($ticket["archivo"]) ? "<a href='{$ticket["archivo"]}' target='_blank'>Ver archivo</a>" : "Sin archivo") . "</td>";
+
+        // Tiempo transcurrido (usando tramo abierto si existe)
+        if ($ticket["estado"] === "Gestionado" && isset($ticket["tiempo_gestionado"])) {
+            // Tickets cerrados: mantenemos tiempo fijo guardado en tickets.tiempo_gestionado
+            $tiempo_fijo = gmdate("H\h i\m s\s", (int)$ticket["tiempo_gestionado"]);
+            echo "<td><span class='contador' style='background:gray;' data-activo='0'>$tiempo_fijo</span></td>";
+        } else {
+            // Tickets abiertos: usamos la fecha de inicio del tramo actual
+            $fechaInicioISO = $inicioDT->format("c");
+            echo "<td><span class='contador' style='background:$color;' data-inicio='$fechaInicioISO' data-activo='1'>{$horas}h {$min}m {$seg}s</span></td>";
         }
 
-        echo "</select>";
+
+        // Asignar Usuario (sin confirmación en el select)
+        if ($categoria === "Gestionado" || $nivel_admin === 3) {
+            echo "<td><span>$usuarioAsignado</span></td>";
+        } else {
+            echo "<td>";
+            // mantenemos la estructura if/else pero ambos sin confirm
+            if (!empty($usuarioAsignado)) {
+                echo "<select id='usuario_asignado_$id' onchange=\"asignarUsuario($id, this.value)\"><option value=''>Seleccione un usuario</option>";
+            } else {
+                echo "<select id='usuario_asignado_$id' onchange=\"asignarUsuario($id, this.value)\"><option value=''>Seleccione un usuario</option>";
+            }
+
+            foreach ($usuarios as $u) {
+                $selected = ($u === $usuarioAsignado) ? "selected" : "";
+                echo "<option value='$u' $selected>$u</option>";
+            }
+
+            echo "</select>";
+            echo "</td>";
+        }
+
+        // Categoría
+        if ($categoria === "Gestionado" || $nivel_admin === 3) {
+            echo "<td>" . (!empty($ticket["categoria"]) ? htmlspecialchars($ticket["categoria"]) : "<em>Sin categoría</em>") . "</td>";
+        } else {
+            echo "<td><select id='categoria_$id' onchange=\"asignarCategoria($id, this.value)\">";
+            $categorias = [
+                "Camaras XVR",
+                "ESKO",
+                "FPS Web",
+                "FPS Station",
+                "FPS Desktop",
+                "Paletizado",
+                "Global Vision",
+                "Power BI",
+                "Proyectos",
+                "QCS",
+                "SAP",
+                "Soporte TI",
+                "SQL Server"
+            ];
+            echo "<option value=''>Seleccione categoría</option>";
+            foreach ($categorias as $cat) {
+                $selected = ($ticket["categoria"] === $cat) ? "selected" : "";
+                echo "<option value='$cat' $selected>$cat</option>";
+            }
+            echo "</select></td>";
+        }
+
+        // Estado (sin confirm en el select, y con id para live-sync)
+        if ($categoria === "Gestionado" || $nivel_admin === 3) {
+            echo "<td>$estadoTicket</td>";
+        } else {
+            echo "<td><select id='estado_$id' onchange=\"cambiarEstadoManual($id, this.value)\">";
+            foreach (['Ingresado', 'Asignado', 'En curso', 'Detenido', 'Prueba y Aceptacion'] as $estado) {
+                $selected = ($estado === $estadoTicket) ? "selected" : "";
+                echo "<option value=\"$estado\" $selected>$estado</option>";
+            }
+            echo "</select></td>";
+        }
+
+        // Botón final
+        echo "<td>";
+        if ($categoria === "Gestionado" && $nivel_admin !== 3) {
+            echo "<button onclick=\"confirmarReabrir($id, '$tipoOriginal')\">Reabrir</button>";
+        } elseif ($categoria !== "Gestionado" && $nivel_admin !== 3) {
+            echo "<button onclick=\"confirmarCierre($id)\">Cerrado</button>";
+        } else {
+            echo "<span style='color: gray;'>Sin acciones</span>";
+        }
         echo "</td>";
+        echo "</tr>";
     }
-
-    // Categoría
-    if ($categoria === "Gestionado" || $nivel_admin === 3) {
-        echo "<td>" . (!empty($ticket["categoria"]) ? htmlspecialchars($ticket["categoria"]) : "<em>Sin categoría</em>") . "</td>";
-    } else {
-        echo "<td><select id='categoria_$id' onchange=\"asignarCategoria($id, this.value)\">";
-        $categorias = [
-            "Camaras XVR", "ESKO", "FPS Web", "FPS Station", "FPS Desktop", "Paletizado", "Global Vision",
-            "Power BI", "Proyectos", "QCS", "SAP", "Soporte TI", "SQL Server"
-        ];
-        echo "<option value=''>Seleccione categoría</option>";
-        foreach ($categorias as $cat) {
-            $selected = ($ticket["categoria"] === $cat) ? "selected" : "";
-            echo "<option value='$cat' $selected>$cat</option>";
-        }
-        echo "</select></td>";
-    }
-
-    // Estado (sin confirm en el select, y con id para live-sync)
-    if ($categoria === "Gestionado" || $nivel_admin === 3) {
-        echo "<td>$estadoTicket</td>";
-    } else {
-        echo "<td><select id='estado_$id' onchange=\"cambiarEstadoManual($id, this.value)\">";
-        foreach (['Ingresado', 'Asignado', 'En curso','Detenido','Prueba y Aceptacion'] as $estado) {
-            $selected = ($estado === $estadoTicket) ? "selected" : "";
-            echo "<option value=\"$estado\" $selected>$estado</option>";
-        }
-        echo "</select></td>";
-    }
-
-    // Botón final
-    echo "<td>";
-    if ($categoria === "Gestionado" && $nivel_admin !== 3) {
-        echo "<button onclick=\"confirmarReabrir($id, '$tipoOriginal')\">Reabrir</button>";
-    } elseif ($categoria !== "Gestionado" && $nivel_admin !== 3) {
-        echo "<button onclick=\"confirmarCierre($id)\">Cerrado</button>";
-    } else {
-        echo "<span style='color: gray;'>Sin acciones</span>";
-    }
-    echo "</td>";
-    echo "</tr>";
-  
-}
-echo "</tbody></table></div>";
-
+    echo "</tbody></table></div>";
 }
 
 if ($categoria === 'Gestionado') {
@@ -305,251 +361,275 @@ echo '<div id="popupForm">
 </div>';
 ?>
 <script>
-// === NUEVO: funciones sin reload y sin confirm en selects (guardan un campo a la vez) ===
-function asignarUsuario(id, usuario) {
-    if (usuario !== "") {
-        fetch('update_ticket_field.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'id=' + encodeURIComponent(id) +
-                  '&field=usuario_asignado' +
-                  '&value=' + encodeURIComponent(usuario)
-        })
-        .then(r => r.json())
-        .then(d => { if (!d.ok) alert('No se pudo asignar el usuario'); })
-        .catch(() => alert('Error de red al asignar usuario'));
-    }
-}
-function cambiarEstadoManual(id, estado) {
-    fetch('update_ticket_field.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'id=' + encodeURIComponent(id) +
-              '&field=estado_ticket' + // cambia a 'estado' si tu columna se llama así
-              '&value=' + encodeURIComponent(estado)
-    })
-    .then(r => r.json())
-    .then(d => { if (!d.ok) alert('No se pudo cambiar el estado'); })
-    .catch(() => alert('Error de red al cambiar estado'));
-}
-// ✅ Global: asignar categoría sin reload
-function asignarCategoria(id, categoria) {
-    if (categoria !== "") {
-        fetch('update_ticket_field.php', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: 'id=' + encodeURIComponent(id) +
-                  '&field=categoria' +
-                  '&value=' + encodeURIComponent(categoria)
-        })
-        .then(r => r.json())
-        .then(d => { if (!d.ok) alert('No se pudo actualizar la categoría'); })
-        .catch(() => alert('Error de red al cambiar categoría'));
-    }
-}
-
-function confirmarCierre(id) {
-    if (confirm("¿Estás seguro de que deseas cerrar este ticket?")) {
-        marcarComoGestionado(id);
-    }
-}
-function confirmarReabrir(id, tipo) {
-    if (confirm("¿Deseas reabrir este ticket y enviarlo al estado 'Ingresado'?")) {
-        reabrirTicket(id, tipo);
-    }
-}
-function marcarComoGestionado(id) {
-    const usuario = document.getElementById('usuario_asignado_' + id).value;
-    const categoria = document.getElementById("categoria_" + id)?.value;
-
-    if (!usuario) {
-        alert("Debe seleccionar un usuario.");
-        return;
-    }
-
-    if (!categoria || categoria === "") {
-        alert("Debe seleccionar una categoría.");
-        return;
-    }
-
-    fetch('marcar_gestionado.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'ticket_id=' + id + 
-              '&usuario_asignado=' + encodeURIComponent(usuario) + 
-              '&categoria=' + encodeURIComponent(categoria)
-    }).then(response => response.text())
-      .then(data => {
-          console.log(data);  // Puedes eliminar esto luego si todo funciona bien
-          location.reload();
-      });
-}
-
-function reabrirTicket(id, tipo) {
-    fetch('reabrir_ticket.php', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'ticket_id=' + id + '&tipo=' + encodeURIComponent(tipo)
-    }).then(() => location.reload());
-}
-function actualizarContadores() {
-    const ahora = new Date();
-    document.querySelectorAll('.contador').forEach(function(span) {
-        if (span.dataset.activo === "0") return;
-
-        const inicio = new Date(span.dataset.inicio);
-        const diff = ahora - inicio;
-
-        const horas = Math.floor(diff / (1000 * 60 * 60));
-        const minutos = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
-        const segundos = Math.floor((diff % (1000 * 60)) / 1000);
-
-        let color = "green";
-        if (horas >= 4) color = "red";
-        else if (horas >= 2) color = "orange";
-
-        span.innerText = `${horas}h ${minutos}m ${segundos}s`;
-        span.style.background = color;
-    });
-}
-function openPopup() {
-    document.getElementById('popupForm').style.display = 'block';
-}
-function closePopup() {
-    document.getElementById('popupForm').style.display = 'none';
-}
-
-let ticketIdActual = null;
-
-function mostrarChat(id) {
-    ticketIdActual = id;
-
-    fetch('ver_chat_ticket.php?id=' + id)
-        .then(res => res.text())
-        .then(html => {
-            document.getElementById('chatContenido').innerHTML = html;
-            document.getElementById('chatPopup').style.display = 'block';
-            document.getElementById('respuestaAdmin').value = '';
-            document.getElementById('btnEnviarResp').disabled = false;
-
-            // Evento ENTER para enviar
-            const textarea = document.getElementById('respuestaAdmin');
-            if (textarea) {
-                textarea.onkeydown = function (event) {
-                    if (event.key === 'Enter' && !event.shiftKey) {
-                        event.preventDefault();
-                        enviarRespuesta();
-                    }
-                }
-            }
-        });
-}
-
-function cerrarChat() {
-    document.getElementById('chatPopup').style.display = 'none';
-}
-
-function enviarRespuesta() {
-    const textarea = document.getElementById('respuestaAdmin');
-    const mensaje = textarea.value.trim();
-    const archivoInput = document.getElementById('archivoAdjuntoChat');
-    const archivo = archivoInput.files[0];
-    const chat = document.getElementById('chatContenido');
-    const boton = document.getElementById('btnEnviarResp');
-
-    // Previene doble envío
-    if (boton.disabled) return;
-
-    if (mensaje === '' && !archivo) {
-        alert("Escribe una respuesta o adjunta un archivo.");
-        return;
-    }
-
-    // Mostrar el mensaje al instante en el chat solo si hay texto
-    if (mensaje !== '') {
-        const nuevaBurbuja = document.createElement('div');
-        nuevaBurbuja.className = "burbuja admin";
-        nuevaBurbuja.innerText = mensaje;
-        chat.appendChild(nuevaBurbuja);
-        chat.scrollTop = chat.scrollHeight;
-    }
-
-    // Vacía los campos y desactiva el botón
-    textarea.value = '';
-    archivoInput.value = '';
-    boton.disabled = true;
-    boton.innerText = "Enviando...";
-
-    // Envío con FormData
-    const formData = new FormData();
-    formData.append('id', ticketIdActual);
-    formData.append('mensaje', mensaje);
-    if (archivo) {
-        formData.append('archivo', archivo);
-    }
-
-    fetch('responder_ticket.php', {
-        method: 'POST',
-        body: formData
-        // IMPORTANTE: NO agregar headers aquí, el navegador lo hace automáticamente para FormData
-    })
-    .then(res => res.text())
-    .then(response => {
-        boton.disabled = false;
-        boton.innerText = "Enviar Respuesta";
-
-        // Opcional: muestra mensaje de éxito o error del backend
-        if (response && response.trim().substring(0, 1) === '✔') {
-            // Recarga el chat para mostrar la nueva respuesta o archivo adjunto
-            mostrarChat(ticketIdActual);
-        } else if (response && response.trim() !== "") {
-            alert("Servidor: " + response);
-        } else {
-            mostrarChat(ticketIdActual);
+    // === NUEVO: funciones sin reload y sin confirm en selects (guardan un campo a la vez) ===
+    function asignarUsuario(id, usuario) {
+        if (usuario !== "") {
+            fetch('update_ticket_field.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: 'id=' + encodeURIComponent(id) +
+                        '&field=usuario_asignado' +
+                        '&value=' + encodeURIComponent(usuario)
+                })
+                .then(r => r.json())
+                .then(d => {
+                    if (!d.ok) alert('No se pudo asignar el usuario');
+                })
+                .catch(() => alert('Error de red al asignar usuario'));
         }
-    })
-    .catch(error => {
-        boton.disabled = false;
-        boton.innerText = "Enviar Respuesta";
-        alert("Error al enviar la respuesta: " + error);
-    });
+    }
 
-    // (Se mantiene tu función anidada tal cual, sin tocarla)
+    function cambiarEstadoManual(id, estado) {
+        fetch('update_ticket_field.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: 'id=' + encodeURIComponent(id) +
+                    '&field=estado_ticket' + // cambia a 'estado' si tu columna se llama así
+                    '&value=' + encodeURIComponent(estado)
+            })
+            .then(r => r.json())
+            .then(d => {
+                if (!d.ok) alert('No se pudo cambiar el estado');
+            })
+            .catch(() => alert('Error de red al cambiar estado'));
+    }
+    // ✅ Global: asignar categoría sin reload
     function asignarCategoria(id, categoria) {
         if (categoria !== "") {
-            fetch('cambiar_categoria.php', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: 'ticket_id=' + id + '&categoria=' + encodeURIComponent(categoria)
-            }).then(() => location.reload());
+            fetch('update_ticket_field.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: 'id=' + encodeURIComponent(id) +
+                        '&field=categoria' +
+                        '&value=' + encodeURIComponent(categoria)
+                })
+                .then(r => r.json())
+                .then(d => {
+                    if (!d.ok) alert('No se pudo actualizar la categoría');
+                })
+                .catch(() => alert('Error de red al cambiar categoría'));
         }
     }
-}
 
-// Iniciar contador tras carga del DOM
-document.addEventListener('DOMContentLoaded', function () {
-    actualizarContadores();
-    setInterval(actualizarContadores, 1000);
-});
+    function confirmarCierre(id) {
+        if (confirm("¿Estás seguro de que deseas cerrar este ticket?")) {
+            marcarComoGestionado(id);
+        }
+    }
+
+    function confirmarReabrir(id, tipo) {
+        if (confirm("¿Deseas reabrir este ticket y enviarlo al estado 'Ingresado'?")) {
+            reabrirTicket(id, tipo);
+        }
+    }
+
+    function marcarComoGestionado(id) {
+        const usuario = document.getElementById('usuario_asignado_' + id).value;
+        const categoria = document.getElementById("categoria_" + id)?.value;
+
+        if (!usuario) {
+            alert("Debe seleccionar un usuario.");
+            return;
+        }
+
+        if (!categoria || categoria === "") {
+            alert("Debe seleccionar una categoría.");
+            return;
+        }
+
+        fetch('marcar_gestionado.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                body: 'ticket_id=' + id +
+                    '&usuario_asignado=' + encodeURIComponent(usuario) +
+                    '&categoria=' + encodeURIComponent(categoria)
+            }).then(response => response.text())
+            .then(data => {
+                console.log(data); // Puedes eliminar esto luego si todo funciona bien
+                location.reload();
+            });
+    }
+
+    function reabrirTicket(id, tipo) {
+        fetch('reabrir_ticket.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            },
+            body: 'ticket_id=' + id + '&tipo=' + encodeURIComponent(tipo)
+        }).then(() => location.reload());
+    }
+
+    function actualizarContadores() {
+        const ahora = new Date();
+        document.querySelectorAll('.contador').forEach(function(span) {
+            if (span.dataset.activo === "0") return;
+
+            const inicio = new Date(span.dataset.inicio);
+            const diff = ahora - inicio;
+
+            const horas = Math.floor(diff / (1000 * 60 * 60));
+            const minutos = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+            const segundos = Math.floor((diff % (1000 * 60)) / 1000);
+
+            let color = "green";
+            if (horas >= 4) color = "red";
+            else if (horas >= 2) color = "orange";
+
+            span.innerText = `${horas}h ${minutos}m ${segundos}s`;
+            span.style.background = color;
+        });
+    }
+
+    function openPopup() {
+        document.getElementById('popupForm').style.display = 'block';
+    }
+
+    function closePopup() {
+        document.getElementById('popupForm').style.display = 'none';
+    }
+
+    let ticketIdActual = null;
+
+    function mostrarChat(id) {
+        ticketIdActual = id;
+
+        fetch('ver_chat_ticket.php?id=' + id)
+            .then(res => res.text())
+            .then(html => {
+                document.getElementById('chatContenido').innerHTML = html;
+                document.getElementById('chatPopup').style.display = 'block';
+                document.getElementById('respuestaAdmin').value = '';
+                document.getElementById('btnEnviarResp').disabled = false;
+
+                // Evento ENTER para enviar
+                const textarea = document.getElementById('respuestaAdmin');
+                if (textarea) {
+                    textarea.onkeydown = function(event) {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                            event.preventDefault();
+                            enviarRespuesta();
+                        }
+                    }
+                }
+            });
+    }
+
+    function cerrarChat() {
+        document.getElementById('chatPopup').style.display = 'none';
+    }
+
+    function enviarRespuesta() {
+        const textarea = document.getElementById('respuestaAdmin');
+        const mensaje = textarea.value.trim();
+        const archivoInput = document.getElementById('archivoAdjuntoChat');
+        const archivo = archivoInput.files[0];
+        const chat = document.getElementById('chatContenido');
+        const boton = document.getElementById('btnEnviarResp');
+
+        // Previene doble envío
+        if (boton.disabled) return;
+
+        if (mensaje === '' && !archivo) {
+            alert("Escribe una respuesta o adjunta un archivo.");
+            return;
+        }
+
+        // Mostrar el mensaje al instante en el chat solo si hay texto
+        if (mensaje !== '') {
+            const nuevaBurbuja = document.createElement('div');
+            nuevaBurbuja.className = "burbuja admin";
+            nuevaBurbuja.innerText = mensaje;
+            chat.appendChild(nuevaBurbuja);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        // Vacía los campos y desactiva el botón
+        textarea.value = '';
+        archivoInput.value = '';
+        boton.disabled = true;
+        boton.innerText = "Enviando...";
+
+        // Envío con FormData
+        const formData = new FormData();
+        formData.append('id', ticketIdActual);
+        formData.append('mensaje', mensaje);
+        if (archivo) {
+            formData.append('archivo', archivo);
+        }
+
+        fetch('responder_ticket.php', {
+                method: 'POST',
+                body: formData
+                // IMPORTANTE: NO agregar headers aquí, el navegador lo hace automáticamente para FormData
+            })
+            .then(res => res.text())
+            .then(response => {
+                boton.disabled = false;
+                boton.innerText = "Enviar Respuesta";
+
+                // Opcional: muestra mensaje de éxito o error del backend
+                if (response && response.trim().substring(0, 1) === '✔') {
+                    // Recarga el chat para mostrar la nueva respuesta o archivo adjunto
+                    mostrarChat(ticketIdActual);
+                } else if (response && response.trim() !== "") {
+                    alert("Servidor: " + response);
+                } else {
+                    mostrarChat(ticketIdActual);
+                }
+            })
+            .catch(error => {
+                boton.disabled = false;
+                boton.innerText = "Enviar Respuesta";
+                alert("Error al enviar la respuesta: " + error);
+            });
+
+        // (Se mantiene tu función anidada tal cual, sin tocarla)
+        function asignarCategoria(id, categoria) {
+            if (categoria !== "") {
+                fetch('cambiar_categoria.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded'
+                    },
+                    body: 'ticket_id=' + id + '&categoria=' + encodeURIComponent(categoria)
+                }).then(() => location.reload());
+            }
+        }
+    }
+
+    // Iniciar contador tras carga del DOM
+    document.addEventListener('DOMContentLoaded', function() {
+        actualizarContadores();
+        setInterval(actualizarContadores, 1000);
+    });
 </script>
 
 <!-- POPUP DE CHAT -->
 <div id="chatPopup" style="display:none; position:fixed; top:10%; left:50%; transform:translateX(-50%); background:#ffffff; color:#000; padding:20px; border-radius:15px; width:90%; max-width:500px; box-shadow:0 4px 12px rgba(0,0,0,0.3); z-index:10000;">
     <div id="chatContenido"></div>
-<?php if ($nivel_admin !== 3): ?>
-    <textarea id="respuestaAdmin" placeholder="Escribe tu respuesta..." style="width:100%; height:80px; margin-top:10px;"></textarea>
-    <input type="file" id="archivoAdjuntoChat" style="...">
-    <button id="btnEnviarResp" onclick="enviarRespuesta()" style="...">Enviar Respuesta</button>
-<?php else: ?>
-    <p style="margin:10px 0; color:gray;"><em>No tienes permisos para responder.</em></p>
-<?php endif; ?>
-<button onclick="cerrarChat()">Cerrar</button>
+    <?php if ($nivel_admin !== 3): ?>
+        <textarea id="respuestaAdmin" placeholder="Escribe tu respuesta..." style="width:100%; height:80px; margin-top:10px;"></textarea>
+        <input type="file" id="archivoAdjuntoChat" style="...">
+        <button id="btnEnviarResp" onclick="enviarRespuesta()" style="...">Enviar Respuesta</button>
+    <?php else: ?>
+        <p style="margin:10px 0; color:gray;"><em>No tienes permisos para responder.</em></p>
+    <?php endif; ?>
+    <button onclick="cerrarChat()">Cerrar</button>
 
 </div>
 
 <!-- ESTILOS DEL POPUP -->
 <style>
-/* Chat estilo moderno */
+    /* Chat estilo moderno */
     #chatPopup {
         display: none;
         position: fixed;
@@ -587,7 +667,7 @@ document.addEventListener('DOMContentLoaded', function () {
         word-wrap: break-word;
         display: inline-block;
         clear: both;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
     }
 
     .usuario {
@@ -614,4 +694,6 @@ document.addEventListener('DOMContentLoaded', function () {
 <!-- Live sync (2s) y overrides seguros -->
 <script src="admin_live.js?v=1"></script>
 
-</body></html>
+</body>
+
+</html>
