@@ -51,7 +51,9 @@ while ($t = mysqli_fetch_assoc($rTramos)) {
 
 /************************************/
 
-$condiciones = ["estado_ticket = 'Gestionado'"];
+$condiciones = ["estado IN ('Gestionado', 'Cerrado')"];
+
+
 if ($ticket_number !== '') {
   $condiciones[] = "numero_ticket LIKE '%" . mysqli_real_escape_string($conexion, $ticket_number) . "%'";
 }
@@ -244,10 +246,23 @@ $resultado = mysqli_query($conexion, $query);
               $total += $min;
 
               $ini = substr($t['fecha_inicio'], 11, 5);
-              $fin = $t['fecha_fin'] ? substr($t['fecha_fin'], 11, 5) : '...';
+
+              // cuando el tramo tiene fecha_fin REAL → usarla
+              if (!empty($t['fecha_fin']) && $t['fecha_fin'] != "0000-00-00 00:00:00") {
+
+                $fin = substr($t['fecha_fin'], 11, 5);   // hora real
+                $estadoFin = $t['estado_fin'] ?: '—';
+              }
+              // cuando NO tiene fecha_fin → estaba en curso al cerrar el ticket
+              else {
+
+                $fin = 'Cierre';        // texto para mostrar en historial
+                $estadoFin = 'Cerrado'; // estado final
+              }
+
 
               $estadoIni = $t['estado_inicio'] ?: '—';
-              $estadoFin = $t['estado_fin'] ?: '—';
+
 
               $lista_tramos .= "
     <strong>$estadoIni → $estadoFin</strong><br>

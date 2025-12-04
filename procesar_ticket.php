@@ -6,6 +6,13 @@ error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
 include("conexion.php");
+// Zona horaria correcta
+date_default_timezone_set('America/Santiago');
+
+// Asegurar zona horaria también en MySQL
+$conexion->query("SET time_zone = '-03:00'");
+
+
 
 // ====== NUEVO: área y categoría ======
 $area_id      = isset($_POST['area_id']) ? (int)$_POST['area_id'] : 1; // 1 = TI, 2 = Servicios Generales
