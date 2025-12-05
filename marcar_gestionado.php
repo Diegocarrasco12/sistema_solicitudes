@@ -4,9 +4,52 @@ include("conexion.php");
 // Zona horaria correcta
 date_default_timezone_set('America/Santiago');
 
-// Incluir función de minutos hábiles si existe
+/**
+ * Opcional: si algún día creas un archivo separado con esta función,
+ * se incluirá aquí sin romper nada.
+ */
 if (file_exists(__DIR__ . "/calcular_minutos_habiles.php")) {
     include_once __DIR__ . "/calcular_minutos_habiles.php";
+}
+
+/**
+ * Definir la función calcular_minutos_habiles solo si aún no existe.
+ * Es la misma lógica que usas en cambiar_estado.php / update_ticket_field.php
+ */
+if (!function_exists('calcular_minutos_habiles')) {
+    function calcular_minutos_habiles($inicio, $fin)
+    {
+        $ini = new DateTime($inicio);
+        $fn  = new DateTime($fin);
+
+        $min = 0;
+        $laboral_ini = new DateTime($ini->format("Y-m-d 07:30:00"));
+        $laboral_fin = new DateTime($ini->format("Y-m-d 18:30:00"));
+
+        while ($ini < $fn) {
+
+            // 0 = domingo, 6 = sábado
+            $dow = (int)$ini->format("w");
+            $es_laboral = ($dow >= 1 && $dow <= 5);
+
+            if ($es_laboral) {
+                if ($ini >= $laboral_ini && $ini <= $laboral_fin) {
+                    $min++;
+                }
+            }
+
+            // avanzar 1 minuto
+            $ini->modify("+1 minute");
+
+            // si cambió el día, recalculamos el rango laboral
+            if ($ini->format("H:i") === "00:00") {
+                $laboral_ini = new DateTime($ini->format("Y-m-d 07:30:00"));
+                $laboral_fin = new DateTime($ini->format("Y-m-d 18:30:00"));
+            }
+        }
+
+        return $min;
+    }
 }
 
 $ticketId  = isset($_POST['ticket_id']) ? (int)$_POST['ticket_id'] : 0;
@@ -46,11 +89,10 @@ $tiempo_legible_seg = sprintf('%02dh %02dm %02ds', $h_seg, $m_seg, $s_seg);
 $usa_tramos = false;
 $minutos_habiles_totales = null;
 
-if (function_exists('calcularMinutosHabiles')) {
-    $check = $conexion->query("SHOW TABLES LIKE 'ticket_tramos'");
-    if ($check && $check->num_rows > 0) {
-        $usa_tramos = true;
-    }
+// ✅ CORRECCIÓN: usar el nombre correcto de la función
+$check = $conexion->query("SHOW TABLES LIKE 'ticket_tramos'");
+if ($check && $check->num_rows > 0 && function_exists('calcular_minutos_habiles')) {
+    $usa_tramos = true;
 }
 
 if ($usa_tramos) {
@@ -76,8 +118,7 @@ if ($usa_tramos) {
         // Minutos hábiles del tramo final
         $min_tramo = (int)calcular_minutos_habiles($fecha_inicio, $fecha_fin);
 
-
-        // AQUÍ estaba el error → faltaba estado_fin
+        // Cerrar tramo final y marcar estado_fin
         $stmt = $conexion->prepare("
             UPDATE ticket_tramos
             SET fecha_fin = ?, 
@@ -108,13 +149,14 @@ if ($usa_tramos) {
 /*********************************************************
  * 3) Determinar tiempo final
  *********************************************************/
-$tiempo_gestionado         = $segundos_totales;  // por defecto
+$tiempo_gestionado         = $segundos_totales;  // por defecto (segundos naturales)
 $tiempo_gestionado_seg     = $segundos_totales;
 $tiempo_gestionado_legible = $tiempo_legible_seg;
 
+// Si hay tramos y suman más de 0, usamos los minutos hábiles
 if ($usa_tramos && $minutos_habiles_totales > 0) {
-    $tiempo_gestionado = $minutos_habiles_totales;
-    $tiempo_gestionado_seg = $segundos_totales;
+    $tiempo_gestionado = $minutos_habiles_totales; // aquí guardas minutos hábiles
+    $tiempo_gestionado_seg = $segundos_totales;    // mantienes también segundos reales
 
     $h_min = floor($minutos_habiles_totales / 60);
     $m_min = $minutos_habiles_totales % 60;
